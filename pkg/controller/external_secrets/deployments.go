@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -815,6 +816,16 @@ func (r *Reconciler) applyUserDeploymentConfigs(deployment *appsv1.Deployment, e
 					}
 				}
 			}
+
+			// Apply ExtraArgs only to the target component container.
+			if len(i.ExtraArgs) > 0 {
+				for j := range deployment.Spec.Template.Spec.Containers {
+					if deployment.Spec.Template.Spec.Containers[j].Name == containerName {
+						mergeArgs(&deployment.Spec.Template.Spec.Containers[j], i.ExtraArgs)
+						break
+					}
+				}
+			}
 			break
 		}
 	}
@@ -840,6 +851,29 @@ func mergeUserEnvVars(container *corev1.Container, overrideEnv []corev1.EnvVar) 
 		}
 		if !found {
 			container.Env = append(container.Env, override)
+		}
+	}
+}
+
+// mergeArgs merges user-defined extra arguments into a container, user-defined values take precedence over existing values.
+func mergeArgs(container *corev1.Container, extraArgs []string) {
+	if container.Args == nil {
+		container.Args = []string{}
+	}
+
+	for _, extra := range extraArgs {
+		extraKey, _, _ := strings.Cut(extra, "=")
+		found := false
+		for i, existing := range container.Args {
+			existingKey, _, _ := strings.Cut(existing, "=")
+			if existingKey == extraKey {
+				container.Args[i] = extra // User-defined value takes precedence
+				found = true
+				break
+			}
+		}
+		if !found {
+			container.Args = append(container.Args, extra)
 		}
 	}
 }

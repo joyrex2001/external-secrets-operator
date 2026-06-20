@@ -719,6 +719,66 @@ func TestCreateOrApplyDeployments(t *testing.T) {
 			validateDeployment: validateRevisionHistory(10),
 		},
 		{
+			name: "deployment with extraArgs appended to controller default args",
+			preReq: func(r *Reconciler, m *fakes.FakeCtrlClient, d **appsv1.Deployment) {
+				setupDeploymentCreate(m, d, "external-secrets")
+			},
+			updateExternalSecretsConfig: escWithComponentConfigs(v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.CoreController,
+				ExtraArgs:     []string{"--client-qps=100"},
+			}),
+			validateDeployment: func(t *testing.T, d *appsv1.Deployment) {
+				if d == nil {
+					t.Error("deployment should not be nil")
+					return
+				}
+				for _, c := range d.Spec.Template.Spec.Containers {
+					if c.Name == "external-secrets" {
+						for _, arg := range c.Args {
+							if arg == "--client-qps=100" {
+								return
+							}
+						}
+						t.Errorf("expected --client-qps=100 in args, got %v", c.Args)
+						return
+					}
+				}
+				t.Error("external-secrets container not found")
+			},
+		},
+		{
+			name: "deployment with extraArgs overriding controller default arg",
+			preReq: func(r *Reconciler, m *fakes.FakeCtrlClient, d **appsv1.Deployment) {
+				setupDeploymentCreate(m, d, "external-secrets")
+			},
+			updateExternalSecretsConfig: escWithComponentConfigs(v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.CoreController,
+				ExtraArgs:     []string{"--concurrent=5"},
+			}),
+			validateDeployment: func(t *testing.T, d *appsv1.Deployment) {
+				if d == nil {
+					t.Error("deployment should not be nil")
+					return
+				}
+				for _, c := range d.Spec.Template.Spec.Containers {
+					if c.Name == "external-secrets" {
+						for _, arg := range c.Args {
+							if arg == "--concurrent=1" {
+								t.Errorf("default --concurrent=1 should have been overridden, got args: %v", c.Args)
+								return
+							}
+							if arg == "--concurrent=5" {
+								return
+							}
+						}
+						t.Errorf("expected --concurrent=5 in args, got %v", c.Args)
+						return
+					}
+				}
+				t.Error("external-secrets container not found")
+			},
+		},
+		{
 			name: "multiple components with mixed revisionHistoryLimit configurations",
 			preReq: func(r *Reconciler, m *fakes.FakeCtrlClient, d **appsv1.Deployment) {
 				m.ExistsCalls(doesNotExist())
@@ -1873,6 +1933,67 @@ func TestMergeContainerEnvVars(t *testing.T) {
 	})
 }
 
+func TestMergeArgs(t *testing.T) {
+	tests := []struct {
+		name         string
+		existingArgs []string
+		extraArgs    []string
+		expectedArgs []string
+	}{
+		{
+			name:         "nil container args, add new args",
+			existingArgs: nil,
+			extraArgs:    []string{"--loglevel=debug", "--timeout=30s"},
+			expectedArgs: []string{"--loglevel=debug", "--timeout=30s"},
+		},
+		{
+			name:         "override existing arg by flag key",
+			existingArgs: []string{"--loglevel=info", "--metrics-addr=:8080"},
+			extraArgs:    []string{"--loglevel=debug"},
+			expectedArgs: []string{"--loglevel=debug", "--metrics-addr=:8080"},
+		},
+		{
+			name:         "add new arg to existing ones",
+			existingArgs: []string{"--loglevel=info"},
+			extraArgs:    []string{"--timeout=30s"},
+			expectedArgs: []string{"--loglevel=info", "--timeout=30s"},
+		},
+		{
+			name:         "mix of override and new args",
+			existingArgs: []string{"--loglevel=info", "--metrics-addr=:8080"},
+			extraArgs:    []string{"--loglevel=debug", "--timeout=30s"},
+			expectedArgs: []string{"--loglevel=debug", "--metrics-addr=:8080", "--timeout=30s"},
+		},
+		{
+			name:         "empty extra args does nothing",
+			existingArgs: []string{"--loglevel=info"},
+			extraArgs:    []string{},
+			expectedArgs: []string{"--loglevel=info"},
+		},
+		{
+			name:         "positional arg without equals sign is matched exactly",
+			existingArgs: []string{"webhook", "--loglevel=info"},
+			extraArgs:    []string{"webhook"},
+			expectedArgs: []string{"webhook", "--loglevel=info"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{
+				Name: "test-container",
+				Args: tt.existingArgs,
+			}
+
+			mergeArgs(container, tt.extraArgs)
+
+			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
+				t.Errorf("mergeArgs() got %v, want %v", container.Args, tt.expectedArgs)
+			}
+		})
+	}
+}
+
 func TestApplyUserDeploymentConfigsWithOverrideEnv(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -2391,6 +2512,148 @@ func TestApplyUserCABundleConfig(t *testing.T) {
 				assertRecorderWarningEvent(t, r, trustedCABundleEventInvalidPEM)
 			default:
 				assertNoRecorderEvent(t, r)
+			}
+		})
+	}
+}
+
+func TestApplyUserDeploymentConfigsWithExtraArgs(t *testing.T) {
+	tests := []struct {
+		name            string
+		assetName       string
+		containerName   string
+		componentConfig v1alpha1.ComponentConfig
+		existingArgs    []string
+		expectedArgs    []string
+	}{
+		{
+			name:          "append extra arg to core controller",
+			assetName:     controllerDeploymentAssetName,
+			containerName: "external-secrets",
+			componentConfig: v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.CoreController,
+				ExtraArgs:     []string{"--enable-feature=true"},
+			},
+			existingArgs: []string{"--loglevel=info", "--metrics-addr=:8080"},
+			expectedArgs: []string{"--loglevel=info", "--metrics-addr=:8080", "--enable-feature=true"},
+		},
+		{
+			name:          "extra arg overrides existing arg by flag key",
+			assetName:     controllerDeploymentAssetName,
+			containerName: "external-secrets",
+			componentConfig: v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.CoreController,
+				ExtraArgs:     []string{"--loglevel=debug"},
+			},
+			existingArgs: []string{"--loglevel=info", "--metrics-addr=:8080"},
+			expectedArgs: []string{"--loglevel=debug", "--metrics-addr=:8080"},
+		},
+		{
+			name:          "apply extra args to webhook container",
+			assetName:     webhookDeploymentAssetName,
+			containerName: "webhook",
+			componentConfig: v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.Webhook,
+				ExtraArgs:     []string{"--timeout=60s"},
+			},
+			existingArgs: []string{"webhook", "--port=10250"},
+			expectedArgs: []string{"webhook", "--port=10250", "--timeout=60s"},
+		},
+		{
+			name:          "apply extra args to cert-controller container",
+			assetName:     certControllerDeploymentAssetName,
+			containerName: "cert-controller",
+			componentConfig: v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.CertController,
+				ExtraArgs:     []string{"--requeue-interval=10m"},
+			},
+			existingArgs: []string{"certcontroller", "--metrics-addr=:8080"},
+			expectedArgs: []string{"certcontroller", "--metrics-addr=:8080", "--requeue-interval=10m"},
+		},
+		{
+			name:          "apply extra args to bitwarden container",
+			assetName:     bitwardenDeploymentAssetName,
+			containerName: "bitwarden-sdk-server",
+			componentConfig: v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.BitwardenSDKServer,
+				ExtraArgs:     []string{"--log-level=debug"},
+			},
+			existingArgs: []string{"--port=9090"},
+			expectedArgs: []string{"--port=9090", "--log-level=debug"},
+		},
+		{
+			name:          "empty extra args does not modify container",
+			assetName:     controllerDeploymentAssetName,
+			containerName: "external-secrets",
+			componentConfig: v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.CoreController,
+				ExtraArgs:     nil,
+			},
+			existingArgs: []string{"--loglevel=info"},
+			expectedArgs: []string{"--loglevel=info"},
+		},
+		{
+			name:          "both extra args and override env applied together",
+			assetName:     controllerDeploymentAssetName,
+			containerName: "external-secrets",
+			componentConfig: v1alpha1.ComponentConfig{
+				ComponentName: v1alpha1.CoreController,
+				ExtraArgs:     []string{"--enable-feature=true"},
+				OverrideEnv:   []corev1.EnvVar{{Name: "LOG_LEVEL", Value: "debug"}},
+			},
+			existingArgs: []string{"--loglevel=info"},
+			expectedArgs: []string{"--loglevel=info", "--enable-feature=true"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Reconciler{}
+			initArgs := []string{"--init-only-flag"}
+			deployment := &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							InitContainers: []corev1.Container{
+								{Name: "init-setup", Args: initArgs},
+							},
+							Containers: []corev1.Container{
+								{
+									Name: tt.containerName,
+									Args: tt.existingArgs,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			esc := &v1alpha1.ExternalSecretsConfig{
+				Spec: v1alpha1.ExternalSecretsConfigSpec{
+					ControllerConfig: v1alpha1.ControllerConfig{
+						ComponentConfigs: []v1alpha1.ComponentConfig{tt.componentConfig},
+					},
+				},
+			}
+
+			err := r.applyUserDeploymentConfigs(deployment, esc, tt.assetName)
+			if err != nil {
+				t.Errorf("applyUserDeploymentConfigs() unexpected error: %v", err)
+				return
+			}
+
+			container := &deployment.Spec.Template.Spec.Containers[0]
+			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
+				t.Errorf("applyUserDeploymentConfigs() args = %v, want %v", container.Args, tt.expectedArgs)
+			}
+
+			// Verify init containers are NOT modified by ExtraArgs
+			if len(deployment.Spec.Template.Spec.InitContainers) > 0 {
+				initContainer := &deployment.Spec.Template.Spec.InitContainers[0]
+				if !reflect.DeepEqual(initContainer.Args, initArgs) {
+					t.Errorf("applyUserDeploymentConfigs() should not modify init container args.\nExpected: %+v\nActual: %+v",
+						initArgs, initContainer.Args)
+				}
 			}
 		})
 	}

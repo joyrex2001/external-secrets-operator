@@ -191,6 +191,13 @@ type ComponentConfig struct {
 	// +listMapKey=name
 	// +optional
 	OverrideEnv []corev1.EnvVar `json:"overrideEnv,omitempty"`
+
+	// extraArgs specifies additional command-line arguments for this component's container.
+	// These are appended (de-duped) to the operator's default args for the component.
+	// +kubebuilder:validation:MaxItems:=50
+	// +listType=atomic
+	// +optional
+	ExtraArgs []string `json:"extraArgs,omitempty"`
 }
 
 // DeploymentConfig defines configuration overrides for a Kubernetes Deployment resource.
